@@ -1,0 +1,10 @@
+{
+  "name": "Remix RoundView ESP32 Smartwatch",
+  "description": "A feature-rich ESP32-S3 smartwatch with AI vision image detection, I2S speech synthesis, camera support, circular display, SD card gallery, games, and intuitive rotary input navigation.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
