@@ -95,7 +95,7 @@ void dispatchRotaryEvent(RotaryEvent evt) {
     case SCREEN_HOME:
       if (evt == EVT_CW) g_watchFace = (g_watchFace + 1) % 3;
       else if (evt == EVT_CCW) g_watchFace = (g_watchFace + 2) % 3;
-      else if (evt == EVT_SINGLE_CLICK || evt == EVT_DOUBLE_CLICK) g_screen = SCREEN_MENU;
+      else if (evt == EVT_SINGLE_CLICK) g_screen = SCREEN_MENU;
       break;
 
     case SCREEN_MENU:
@@ -107,13 +107,17 @@ void dispatchRotaryEvent(RotaryEvent evt) {
           SCREEN_BLUETOOTH, SCREEN_GAMES, SCREEN_HOME
         };
         g_screen = kTargets[g_menuIndex];
-        if (g_screen == SCREEN_CAMERA && !g_camState.initialized) {
-          releaseMp3BuffersForCameraIfNoPsram();
-          initOV2640Camera();
+        if (g_screen == SCREEN_CAMERA) {
+          // Always stop music playback & free ~32 KB MP3 decoder RAM when Camera opens
+          stopMusicAndFreeRamForCamera();
+          if (!g_camState.initialized) {
+            initOV2640Camera();
+          }
         } else if (g_screen == SCREEN_GALLERY && g_gallery.fileCount == 0) {
           if (!g_gallery.mounted) initSDCardGallery();
           else scanSDGalleryFolder();
         } else if (g_screen == SCREEN_MUSIC) {
+          ensureMp3Buffers();
           if (!g_music.initialized || g_music.trackCount == 0) {
             initMusicPlayer();
           }
@@ -156,7 +160,7 @@ void dispatchRotaryEvent(RotaryEvent evt) {
           clearRotaryAfterScreenChange();
         } else if (g_camState.activeTool == CAM_TOOL_STREAM) {
           if (!g_camState.initialized) {
-            releaseMp3BuffersForCameraIfNoPsram();
+            stopMusicAndFreeRamForCamera();
             initOV2640Camera();
           }
           g_camState.streaming = !g_camState.streaming;
@@ -187,7 +191,13 @@ void dispatchRotaryEvent(RotaryEvent evt) {
 
     case SCREEN_MUSIC:
       if (evt == EVT_DOUBLE_CLICK) {
-        g_screen = SCREEN_MENU;
+        if (g_music.songListOpen) {
+          g_music.songListOpen = false;
+        } else if (g_music.volumeEditMode) {
+          g_music.volumeEditMode = false;
+        } else {
+          g_screen = SCREEN_MENU;
+        }
       } else {
         handleMusicRotaryEvent(evt);
       }
@@ -268,7 +278,7 @@ void loop() {
   // absorb any button release bounce so it never misfires inside the new screen!
   bool hadInput = false;
   RotaryEvent evt;
-  while ((evt = pollRotarySwitch(g_screen == SCREEN_HOME || g_screen == SCREEN_MENU)) != EVT_NONE) {
+  while ((evt = pollRotarySwitch(false)) != EVT_NONE) {
     WatchScreen prevScreen = g_screen;
     dispatchRotaryEvent(evt);
     hadInput = true;
@@ -279,15 +289,16 @@ void loop() {
   }
 
   // Run Games, Camera, and Radial Menu at full unthrottled FPS;
-  // pace active Music playback UI at 90ms (~11 FPS) so Core 1 spends >80% of time
-  // decoding MP3 frames into I2S DMA; pace Watch Face / Status screens at 30ms (~33 FPS)
+  // pace active Music playback UI (on Music or Home widget) at 90ms (~11 FPS) so Core 1
+  // spends >80% of time decoding MP3 frames into I2S DMA; pace other screens at 30ms (~33 FPS)
   uint32_t nowMs = millis();
   bool highFpsScreen = (
     g_screen == SCREEN_GAMES ||
     g_screen == SCREEN_CAMERA ||
     g_screen == SCREEN_MENU
   );
-  uint32_t targetFrameIntervalMs = (g_screen == SCREEN_MUSIC && g_music.playing) ? 90u : 30u;
+  uint32_t targetFrameIntervalMs =
+    (g_music.playing && (g_screen == SCREEN_MUSIC || g_screen == SCREEN_HOME)) ? 90u : 30u;
 
   if (hadInput || highFpsScreen || (nowMs - g_lastRenderMs) >= targetFrameIntervalMs) {
     g_lastRenderMs = nowMs;

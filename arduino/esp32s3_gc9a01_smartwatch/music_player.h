@@ -1867,8 +1867,8 @@ enum MusicTool : uint8_t {
   MUS_TOOL_PLAY_PAUSE = 0,
   MUS_TOOL_NEXT       = 1,
   MUS_TOOL_PREV       = 2,
-  MUS_TOOL_VOL_UP     = 3,
-  MUS_TOOL_VOL_DOWN   = 4,
+  MUS_TOOL_VOLUME     = 3,
+  MUS_TOOL_SONG_LIST  = 4,
   MUS_TOOL_EQ_MODE    = 5,
   MUS_TOOL_RESCAN     = 6,
   MUS_TOOL_COUNT      = 7
@@ -1909,9 +1909,12 @@ struct MusicPlayerState {
   uint8_t       requestedTrackIndex;
   uint8_t       trackIndex;
   uint8_t       trackCount;
-  uint8_t       volumePct;       // 10 .. 100
+  uint8_t       volumePct;       // 0 .. 100
   uint8_t       activeTool;      // MusicTool enum
   uint8_t       eqPreset;        // MusicEqPreset enum
+  bool          volumeEditMode;  // When true, rotary CW/CCW adjusts volumePct directly
+  bool          songListOpen;    // When true, displays full-screen scrollable SD Song List
+  uint8_t       browserIndex;    // Highlighted track index inside SD Song List
   uint32_t      elapsedSec;
   uint32_t      samplesGenerated;
   uint32_t      dmaBufferedUntilUs; // Microsecond watermark of audio queued in 90ms I2S DMA
@@ -1942,6 +1945,9 @@ static MusicPlayerState g_music = {
   80,
   MUS_TOOL_PLAY_PAUSE,
   EQ_BASS_BOOST,
+  false,
+  false,
+  0,
   0,
   0,
   0,
@@ -1980,17 +1986,31 @@ inline void *allocMusicMem(size_t bytes) {
   return p;
 }
 
-inline void releaseMp3BuffersForCameraIfNoPsram() {
-  if (psramFound()) return;
+/**
+ * Stops active music playback, closes the SD audio file handle, silences I2S DMA,
+ * and frees the ~32 KB MP3 decoder workspace so the Camera has maximum free RAM.
+ */
+inline void stopMusicAndFreeRamForCamera() {
+  if (g_music.playing || g_music.audioFile) {
+    Serial.println("[MUSIC] Stopping music & freeing MP3 RAM for Camera...");
+  }
+  g_music.playing              = false;
+  g_music.trackChangeRequested = false;
+  g_music.volumeEditMode       = false;
+  g_music.songListOpen         = false;
   if (g_music.audioFile) {
     g_music.audioFile.close();
   }
-  g_music.playing = false;
+  flushI2SSilence(20);
   if (g_mp3Scratch) { free(g_mp3Scratch); g_mp3Scratch = NULL; }
   if (g_mp3Dec)     { free(g_mp3Dec);     g_mp3Dec     = NULL; }
   if (g_mp3InBuf)   { free(g_mp3InBuf);   g_mp3InBuf   = NULL; }
   if (g_mp3PcmOut)  { free(g_mp3PcmOut);  g_mp3PcmOut  = NULL; }
   g_mp3BytesInBuf = 0;
+}
+
+inline void releaseMp3BuffersForCameraIfNoPsram() {
+  stopMusicAndFreeRamForCamera();
 }
 
 inline bool ensureMp3Buffers() {
@@ -2827,6 +2847,33 @@ inline void handleMusicRotaryEvent(RotaryEvent evt) {
     return;
   }
 
+  // 1. Interactive SD Song List Browser Mode
+  if (g_music.songListOpen) {
+    if (evt == EVT_CW) {
+      g_music.browserIndex = (g_music.browserIndex + 1) % g_music.trackCount;
+    } else if (evt == EVT_CCW) {
+      g_music.browserIndex = (g_music.browserIndex + g_music.trackCount - 1) % g_music.trackCount;
+    } else if (evt == EVT_SINGLE_CLICK) {
+      selectMusicTrack(g_music.browserIndex);
+      g_music.playing = true;
+      g_music.songListOpen = false;
+    }
+    return;
+  }
+
+  // 2. Rotary Volume Control Mode (CW increases volume, CCW decreases volume, Click exits)
+  if (g_music.volumeEditMode) {
+    if (evt == EVT_CW) {
+      g_music.volumePct = (g_music.volumePct + 5 <= 100) ? (uint8_t)(g_music.volumePct + 5) : (uint8_t)100;
+    } else if (evt == EVT_CCW) {
+      g_music.volumePct = (g_music.volumePct >= 5) ? (uint8_t)(g_music.volumePct - 5) : (uint8_t)0;
+    } else if (evt == EVT_SINGLE_CLICK) {
+      g_music.volumeEditMode = false;
+    }
+    return;
+  }
+
+  // 3. Standard Now-Playing Tool Ring Mode
   if (evt == EVT_CW) {
     g_music.activeTool = (g_music.activeTool + 1) % MUS_TOOL_COUNT;
   } else if (evt == EVT_CCW) {
@@ -2856,11 +2903,12 @@ inline void handleMusicRotaryEvent(RotaryEvent evt) {
         selectMusicTrack((g_music.trackIndex + g_music.trackCount - 1) % g_music.trackCount);
         g_music.playing = true;
         break;
-      case MUS_TOOL_VOL_UP:
-        g_music.volumePct = (g_music.volumePct + 10 <= 100) ? (uint8_t)(g_music.volumePct + 10) : (uint8_t)100;
+      case MUS_TOOL_VOLUME:
+        g_music.volumeEditMode = !g_music.volumeEditMode;
         break;
-      case MUS_TOOL_VOL_DOWN:
-        g_music.volumePct = (g_music.volumePct > 15) ? (uint8_t)(g_music.volumePct - 10) : (uint8_t)10;
+      case MUS_TOOL_SONG_LIST:
+        g_music.browserIndex = g_music.trackIndex;
+        g_music.songListOpen = true;
         break;
       case MUS_TOOL_EQ_MODE:
         g_music.eqPreset = (g_music.eqPreset + 1) % EQ_COUNT;

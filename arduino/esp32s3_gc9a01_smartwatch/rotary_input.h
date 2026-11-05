@@ -82,6 +82,7 @@ static uint32_t g_btnReleaseMs        = 0;
 static bool     g_btnLongPressHandled = false;
 static uint8_t  g_pendingClickCount   = 0;
 static uint32_t g_firstClickReleaseMs = 0;
+static uint32_t g_screenChangeLockoutUntilMs = 0;
 
 void IRAM_ATTR onRotaryQuadratureIsr() {
   // Ignore accidental shaft rotation while the push button is actively held LOW
@@ -112,11 +113,26 @@ inline void initRotarySwitch() {
 /**
  * Polls the EC11 rotary encoder and push button.
  * @param instantSingleClick If true, fires EVT_SINGLE_CLICK immediately with zero
- *                           double-click wait window (used on HOME and MENU).
+ *                           double-click wait window.
  */
 inline RotaryEvent pollRotarySwitch(bool instantSingleClick = false) {
   uint32_t nowMs = millis();
   bool rawBtn = digitalRead(ENC_SW_PIN);
+
+  // 0. Post-screen-change lockout window (400ms): absorbs any trailing 2nd-tap release
+  //    or switch bounce after double-tapping to exit to HOME or MENU so it never
+  //    re-triggers EVT_SINGLE_CLICK on the newly entered screen.
+  if ((int32_t)(g_screenChangeLockoutUntilMs - nowMs) > 0) {
+    g_btnStableState      = rawBtn;
+    g_btnLastDebounceMs   = nowMs;
+    g_btnReleaseMs        = nowMs;
+    g_btnLongPressHandled = true;
+    g_pendingClickCount   = 0;
+    noInterrupts();
+    g_encoderDelta = 0;
+    interrupts();
+    return EVT_NONE;
+  }
 
   // 1. Fast microsecond contact verification + 12ms transition cooldown so quick taps
   //    during a 22ms display flush are caught in a single pollRotarySwitch() call!
@@ -187,17 +203,19 @@ inline RotaryEvent pollRotarySwitch(bool instantSingleClick = false) {
 
 inline void clearRotaryAfterScreenChange() {
   uint32_t waitStart = millis();
-  while (digitalRead(ENC_SW_PIN) == LOW && (millis() - waitStart) < 60u) {
+  while (digitalRead(ENC_SW_PIN) == LOW && (millis() - waitStart) < 100u) {
     delay(1);
   }
   noInterrupts();
   g_encoderDelta = 0;
   interrupts();
-  g_btnStableState      = HIGH;
-  g_btnLastDebounceMs   = millis();
-  g_btnReleaseMs        = millis();
-  g_btnLongPressHandled = true;
-  g_pendingClickCount   = 0;
+  uint32_t nowMs = millis();
+  g_btnStableState             = HIGH;
+  g_btnLastDebounceMs          = nowMs;
+  g_btnReleaseMs               = nowMs;
+  g_btnLongPressHandled        = true;
+  g_pendingClickCount          = 0;
+  g_screenChangeLockoutUntilMs = nowMs + 400u;
 }
 
 #endif // ROTARY_INPUT_H

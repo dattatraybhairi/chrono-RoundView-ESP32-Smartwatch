@@ -301,6 +301,51 @@ inline void renderHomeWatchFace(Arduino_Canvas *cv, uint8_t faceStyle, bool wifi
     cv->printf("SD : %u PHOTOS", g_gallery.fileCount);
   }
 
+  // Live Now-Playing Music Widget on Home Watch Face when music is actively playing
+  if (g_music.playing && g_music.trackCount > 0) {
+    const MusicTrackInfo &trk = g_music.tracks[g_music.trackIndex % g_music.trackCount];
+    uint16_t mAccent = trk.accentColor;
+
+    cv->fillRoundRect(38, 142, 164, 46, 10, COLOR_PANEL_SLATE);
+    cv->drawRoundRect(38, 142, 164, 46, 10, mAccent);
+
+    // Mini spinning vinyl disc on left
+    int16_t vcx = 54, vcy = 165;
+    cv->fillCircle(vcx, vcy, 11, COLOR_BG_OBSIDIAN);
+    cv->drawCircle(vcx, vcy, 11, mAccent);
+    cv->fillCircle(vcx, vcy, 4, mAccent);
+    cv->fillCircle(vcx, vcy, 1, COLOR_BG_OBSIDIAN);
+    float spinRad = ((nowMs / 12) % 360) * ((float)M_PI / 180.0f);
+    cv->drawLine(vcx, vcy, vcx + (int16_t)(9.0f * cosf(spinRad)), vcy + (int16_t)(9.0f * sinf(spinRad)), COLOR_TEXT_WHITE);
+
+    // Track Title & Elapsed Time
+    cv->setTextSize(1);
+    cv->setTextColor(COLOR_TEXT_WHITE);
+    cv->setCursor(70, 148);
+    cv->printf("%.15s", trk.title);
+
+    uint16_t elMin = g_music.elapsedSec / 60;
+    uint16_t elSec = g_music.elapsedSec % 60;
+    cv->setTextColor(mAccent);
+    cv->setCursor(70, 161);
+    cv->printf("%02u/%02u  %02u:%02u", g_music.trackIndex + 1, g_music.trackCount, elMin, elSec);
+
+    // Mini 5-bar animated equalizer on right
+    for (uint8_t b = 0; b < 5; b++) {
+      uint8_t lvl = g_music.spectrum[(b * 3) % 16];
+      int16_t bh = (int16_t)((lvl * 18) / 100);
+      if (bh < 3) bh = 3;
+      cv->fillRect(168 + b * 5, 173 - bh, 3, bh, (b % 2 == 0) ? mAccent : COLOR_CYAN_ACCENT);
+    }
+
+    // Mini track progress bar at bottom of widget
+    cv->fillRect(70, 176, 120, 4, COLOR_BG_OBSIDIAN);
+    uint16_t progW = (trk.durationSec > 0)
+                       ? (uint16_t)min(120UL, (unsigned long)((g_music.elapsedSec * 120UL) / trk.durationSec))
+                       : (uint16_t)((nowMs / 250) % 120);
+    cv->fillRect(70, 176, progW, 4, mAccent);
+  }
+
   cv->setTextSize(1);
   cv->setTextColor(COLOR_TEXT_MUTED);
   cv->setCursor(52, 204);
@@ -678,6 +723,58 @@ inline void renderMusicPlayerScreen(Arduino_Canvas *cv) {
 
   drawCircularBezelTicks(cv, accent);
 
+  // ==========================================================================
+  // FULL-SCREEN INTERACTIVE SD SONG LIST BROWSER OVERLAY
+  // ==========================================================================
+  if (g_music.songListOpen) {
+    cv->setTextSize(1);
+    cv->setTextColor(accent);
+    cv->setCursor(54, 24);
+    cv->printf("SD SONG LIST (%02u/%02u)", g_music.browserIndex + 1, g_music.trackCount);
+
+    // Show 5 scrollable tracks centered around g_music.browserIndex
+    const uint8_t kVisibleRows = 5;
+    int16_t startIdx = (int16_t)g_music.browserIndex - 2;
+    if (startIdx + kVisibleRows > (int16_t)g_music.trackCount) {
+      startIdx = (int16_t)g_music.trackCount - kVisibleRows;
+    }
+    if (startIdx < 0) startIdx = 0;
+
+    for (uint8_t row = 0; row < kVisibleRows; row++) {
+      uint8_t idx = (uint8_t)(startIdx + row);
+      if (idx >= g_music.trackCount) break;
+
+      int16_t ry = 44 + row * 27;
+      bool isSelected = (idx == g_music.browserIndex);
+      bool isPlayingTrack = (idx == g_music.trackIndex);
+
+      uint16_t rowBg = isSelected ? accent : COLOR_PANEL_SLATE;
+      uint16_t rowFg = isSelected ? COLOR_BG_OBSIDIAN : (isPlayingTrack ? COLOR_EMERALD : COLOR_TEXT_WHITE);
+
+      cv->fillRoundRect(34, ry, 172, 23, 6, rowBg);
+      if (!isSelected && isPlayingTrack) {
+        cv->drawRoundRect(34, ry, 172, 23, 6, COLOR_EMERALD);
+      }
+
+      cv->setTextColor(rowFg);
+      cv->setCursor(40, ry + 8);
+      cv->printf("%c%02u %.16s",
+                 isPlayingTrack ? (g_music.playing ? '>' : '*') : ' ',
+                 idx + 1,
+                 g_music.tracks[idx].title);
+
+      // Format tag on right edge
+      cv->setTextColor(isSelected ? COLOR_BG_OBSIDIAN : COLOR_TEXT_MUTED);
+      cv->setCursor(182, ry + 8);
+      cv->print((g_music.tracks[idx].format == TRACK_FMT_MP3) ? "MP3" : "WAV");
+    }
+
+    cv->setTextColor(COLOR_TEXT_MUTED);
+    cv->setCursor(48, 192);
+    cv->print("ROT:SCROLL 1x:PLAY 2x:BACK");
+    return;
+  }
+
   // Track Progress Arc along r=108
   float progRatio = (trk.durationSec > 0)
                       ? (((float)g_music.elapsedSec / (float)trk.durationSec > 1.0f)
@@ -750,14 +847,12 @@ inline void renderMusicPlayerScreen(Arduino_Canvas *cv) {
     cv->fillRect(bx, by, 6, barH, barCol);
   }
 
-  // 7 Interactive Transport / Audio Tool Pills
-  static const char *kMusTools[7] = {
-    "PLAY / PAUSE", "NEXT TRACK >>", "<< PREV TRACK",
-    "VOLUME +10%", "VOLUME -10%", "EQ PRESET", "RESCAN SD CARD"
-  };
-
-  // Codec & Bitrate Readout Row (or diagnostic message if any error occurred)
-  if (g_music.statusText[0] != '\0') {
+  // Codec & Bitrate Readout Row (or Volume Bar when adjusting volume via rotary)
+  if (g_music.volumeEditMode) {
+    cv->fillRoundRect(44, 154, 152, 12, 4, COLOR_PANEL_SLATE);
+    uint16_t volBarW = (uint16_t)((g_music.volumePct * 148) / 100);
+    cv->fillRoundRect(46, 156, volBarW, 8, 3, COLOR_EMERALD);
+  } else if (g_music.statusText[0] != '\0') {
     cv->setTextColor(COLOR_AMBER);
     cv->setCursor(44, 156);
     cv->printf("%.25s", g_music.statusText);
@@ -769,14 +864,47 @@ inline void renderMusicPlayerScreen(Arduino_Canvas *cv) {
   }
 
   // Active Rotary Action Pill at Bottom
-  cv->fillRoundRect(52, 172, 136, 20, 8, accent);
+  uint16_t pillCol = g_music.volumeEditMode ? COLOR_EMERALD : accent;
+  cv->fillRoundRect(46, 172, 148, 20, 8, pillCol);
   cv->setTextColor(COLOR_BG_OBSIDIAN);
-  cv->setCursor(60, 178);
-  cv->printf("[%s]", kMusTools[g_music.activeTool % 7]);
+  cv->setCursor(54, 178);
+
+  if (g_music.volumeEditMode) {
+    cv->printf("[VOL:%3u%% ROT:+/-]", g_music.volumePct);
+  } else {
+    switch (g_music.activeTool % MUS_TOOL_COUNT) {
+      case MUS_TOOL_PLAY_PAUSE:
+        cv->print(g_music.playing ? "[PAUSE PLAYBACK]" : "[PLAY TRACK]");
+        break;
+      case MUS_TOOL_NEXT:
+        cv->print("[NEXT TRACK >>]");
+        break;
+      case MUS_TOOL_PREV:
+        cv->print("[<< PREV TRACK]");
+        break;
+      case MUS_TOOL_VOLUME:
+        cv->printf("[VOLUME: %u%%]", g_music.volumePct);
+        break;
+      case MUS_TOOL_SONG_LIST:
+        cv->printf("[SONG LIST (%u)]", g_music.trackCount);
+        break;
+      case MUS_TOOL_EQ_MODE:
+        cv->printf("[EQ: %s]", kEqNames[g_music.eqPreset % 4]);
+        break;
+      case MUS_TOOL_RESCAN:
+      default:
+        cv->print("[RESCAN SD CARD]");
+        break;
+    }
+  }
 
   cv->setTextColor(COLOR_TEXT_MUTED);
-  cv->setCursor(54, 198);
-  cv->print("1x:ACT  ROT:TOOL  2x:BACK");
+  cv->setCursor(50, 198);
+  if (g_music.volumeEditMode) {
+    cv->print("ROT:VOL +/-  1x/2x:DONE");
+  } else {
+    cv->print("1x:ACT  ROT:TOOL  2x:BACK");
+  }
 }
 
 inline void renderWifiScreen(Arduino_Canvas *cv, bool wifiEnabled) {
